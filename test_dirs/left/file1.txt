@@ -1,0 +1,4 @@
+This is file 1
+It has some content
+Line 3 here
+Original line 4

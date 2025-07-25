@@ -1,0 +1,58 @@
+[package]
+name = "diffy"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "A modular CLI and web directory/file diff tool"
+license = "MIT"
+
+[[bin]]
+name = "diffy"
+path = "src/main.rs"
+
+[dependencies]
+# CLI argument parsing
+clap = { version = "4.4", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Web framework
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# File system operations
+walkdir = "2.4"
+ignore = "0.4"
+
+# Diff algorithms
+similar = "2.3"
+
+# Terminal UI
+ratatui = "0.24"
+crossterm = "0.27"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Browser opening
+webbrowser = "0.8"
+
+# File path handling
+pathdiff = "0.2"
+
+# Colors and styling
+owo-colors = "3.5"
+
+[dev-dependencies]
+tempfile = "3.8"
