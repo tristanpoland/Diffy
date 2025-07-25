@@ -32,6 +32,10 @@ struct Cli {
     /// Enable verbose logging
     #[arg(long, short)]
     verbose: bool,
+
+    /// Include files normally ignored by .gitignore
+    #[arg(long)]
+    include_ignored: bool,
 }
 
 #[tokio::main]
@@ -56,7 +60,7 @@ async fn main() -> Result<()> {
     }
 
     // Create core diff engine
-    let core = DiffyCore::new(cli.left.clone(), cli.right.clone());
+    let core = DiffyCore::new_with_options(cli.left.clone(), cli.right.clone(), cli.include_ignored);
 
     if cli.web {
         // Open browser if requested

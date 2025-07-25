@@ -1,5 +1,6 @@
 use crate::core::types::{DiffHunk, DiffLine, DiffLineKind, FileDiff};
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 
@@ -11,19 +12,42 @@ impl DiffEngine {
     }
 
     pub fn diff_files(&self, left_path: &Path, right_path: &Path) -> Result<FileDiff> {
-        let left_content = if left_path.exists() {
-            Some(std::fs::read_to_string(left_path)
-                .with_context(|| format!("Failed to read left file: {}", left_path.display()))?)
-        } else {
-            None
-        };
+        // Check if either file is binary first
+        let left_is_binary = if left_path.exists() { Self::is_binary_file(left_path)? } else { false };
+        let right_is_binary = if right_path.exists() { Self::is_binary_file(right_path)? } else { false };
 
-        let right_content = if right_path.exists() {
-            Some(std::fs::read_to_string(right_path)
-                .with_context(|| format!("Failed to read right file: {}", right_path.display()))?)
-        } else {
-            None
-        };
+        if left_is_binary || right_is_binary {
+            return Ok(FileDiff {
+                left_content: Some("[Binary file]".to_string()),
+                right_content: Some("[Binary file]".to_string()),
+                hunks: Vec::new(),
+            });
+        }
+
+        // Read both files in parallel
+        let (left_result, right_result) = rayon::join(
+            || {
+                if left_path.exists() {
+                    std::fs::read_to_string(left_path)
+                        .with_context(|| format!("Failed to read left file: {}", left_path.display()))
+                        .map(Some)
+                } else {
+                    Ok(None)
+                }
+            },
+            || {
+                if right_path.exists() {
+                    std::fs::read_to_string(right_path)
+                        .with_context(|| format!("Failed to read right file: {}", right_path.display()))
+                        .map(Some)
+                } else {
+                    Ok(None)
+                }
+            },
+        );
+
+        let left_content = left_result?;
+        let right_content = right_result?;
 
         let hunks = match (&left_content, &right_content) {
             (Some(left), Some(right)) => self.compute_diff_hunks(left, right),
@@ -37,6 +61,14 @@ impl DiffEngine {
             right_content,
             hunks,
         })
+    }
+
+    /// Process multiple file diffs in parallel
+    pub fn diff_files_batch(&self, file_pairs: Vec<(&Path, &Path)>) -> Vec<Result<FileDiff>> {
+        file_pairs
+            .into_par_iter()
+            .map(|(left_path, right_path)| self.diff_files(left_path, right_path))
+            .collect()
     }
 
     fn compute_diff_hunks(&self, left: &str, right: &str) -> Vec<DiffHunk> {

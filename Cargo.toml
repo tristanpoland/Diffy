@@ -54,5 +54,9 @@ pathdiff = "0.2"
 # Colors and styling
 owo-colors = "3.5"
 
+# Parallel processing
+rayon = "1.8"
+num_cpus = "1.16"
+
 [dev-dependencies]
 tempfile = "3.8"

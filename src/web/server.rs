@@ -159,6 +159,17 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
             margin-right: 4px;
         }
 
+        .expand-icon {
+            color: #6e7681;
+            font-family: monospace;
+            margin-right: 4px;
+            user-select: none;
+        }
+
+        .expand-icon:hover {
+            color: #ffffff;
+        }
+
         .status-icon {
             margin-right: 4px;
             font-weight: bold;
@@ -369,6 +380,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 
                 if (result.success) {
                     diffResult = result.data;
+                    initializeCollapsedState(result.data.tree);
                     renderFileTree(result.data.tree);
                     updateStats(result.data);
                 } else {
@@ -382,15 +394,17 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
             }
         }
 
+        let collapsedDirs = new Set(); // Track collapsed directories - default to collapsed
+        
         function renderFileTree(tree, level = 0) {
             const container = document.getElementById('fileTree');
             container.innerHTML = '';
             renderTreeNode(tree, container, level);
         }
 
-        function renderTreeNode(node, container, level) {
+        function renderTreeNode(node, container, level, shouldRender = true) {
             // Only show the item if it has a path (skip the root empty node)
-            if (node.relative_path && node.relative_path !== '') {
+            if (node.relative_path && node.relative_path !== '' && shouldRender) {
                 const item = document.createElement('div');
                 item.className = 'file-item';
                 item.style.paddingLeft = `${level * 16 + 8}px`;
@@ -404,6 +418,21 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 treeConnector.className = 'tree-connector';
                 treeConnector.textContent = level > 0 ? '├─ ' : '';
                 
+                // Add expand/collapse indicator for directories
+                const expandIcon = document.createElement('span');
+                expandIcon.className = 'expand-icon';
+                if (node.is_directory) {
+                    const isCollapsed = collapsedDirs.has(node.relative_path);
+                    expandIcon.textContent = isCollapsed ? '▶ ' : '▼ ';
+                    expandIcon.style.cursor = 'pointer';
+                    expandIcon.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        toggleDirectory(node.relative_path);
+                    });
+                } else {
+                    expandIcon.textContent = '  ';
+                }
+                
                 const fileIcon = document.createElement('span');
                 fileIcon.className = 'file-icon';
                 fileIcon.textContent = node.is_directory ? '📁' : '📄';
@@ -414,18 +443,25 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 
                 item.appendChild(statusIcon);
                 item.appendChild(treeConnector);
+                item.appendChild(expandIcon);
                 item.appendChild(fileIcon);
                 item.appendChild(fileName);
                 
                 if (!node.is_directory) {
                     item.addEventListener('click', () => selectFile(node.relative_path, fileName.textContent));
+                } else {
+                    item.addEventListener('click', () => toggleDirectory(node.relative_path));
+                    item.style.cursor = 'pointer';
                 }
                 
                 container.appendChild(item);
             }
             
-            // Render children with proper indentation
+            // Render children only if directory is not collapsed
             if (node.children && node.children.length > 0) {
+                const isCollapsed = node.is_directory && collapsedDirs.has(node.relative_path);
+                const childLevel = node.relative_path === '' ? level : level + 1;
+                
                 // Sort children: directories first, then files
                 const sortedChildren = [...node.children].sort((a, b) => {
                     if (a.is_directory && !b.is_directory) return -1;
@@ -434,8 +470,32 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 });
                 
                 sortedChildren.forEach(child => {
-                    renderTreeNode(child, container, node.relative_path === '' ? level : level + 1);
+                    renderTreeNode(child, container, childLevel, !isCollapsed);
                 });
+            }
+        }
+
+        function toggleDirectory(dirPath) {
+            if (collapsedDirs.has(dirPath)) {
+                collapsedDirs.delete(dirPath);
+            } else {
+                collapsedDirs.add(dirPath);
+            }
+            
+            // Re-render the tree
+            if (diffResult) {
+                renderFileTree(diffResult.tree);
+            }
+        }
+
+        function initializeCollapsedState(node) {
+            // Mark all directories as collapsed by default
+            if (node.is_directory && node.relative_path && node.relative_path !== '') {
+                collapsedDirs.add(node.relative_path);
+            }
+            
+            if (node.children) {
+                node.children.forEach(child => initializeCollapsedState(child));
             }
         }
 

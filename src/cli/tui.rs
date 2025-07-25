@@ -13,6 +13,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
+use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 
@@ -27,6 +28,7 @@ pub struct TuiApp {
     diff_result: Option<DiffResult>,
     tree_state: ListState,
     tree_items: Vec<TreeDisplayItem>,
+    collapsed_dirs: HashSet<PathBuf>,
     selected_file: Option<PathBuf>,
     current_diff: Option<FileDiff>,
     diff_view_mode: DiffViewMode,
@@ -50,6 +52,7 @@ impl TuiApp {
             diff_result: None,
             tree_state: ListState::default(),
             tree_items: Vec::new(),
+            collapsed_dirs: HashSet::new(),
             selected_file: None,
             current_diff: None,
             diff_view_mode: DiffViewMode::Unified,
@@ -86,7 +89,11 @@ impl TuiApp {
 
     fn load_diff_result(&mut self) -> Result<()> {
         let diff_result = self.core.analyze()?;
-        self.tree_items = Self::flatten_tree(&diff_result.tree, 0);
+        
+        // Collect all directories and mark them as collapsed by default
+        Self::collect_directories(&diff_result.tree, &mut self.collapsed_dirs);
+        
+        self.tree_items = Self::flatten_tree(&diff_result.tree, 0, &self.collapsed_dirs);
         if !self.tree_items.is_empty() {
             self.tree_state.select(Some(0));
         }
@@ -94,7 +101,17 @@ impl TuiApp {
         Ok(())
     }
 
-    fn flatten_tree(entry: &FileEntry, indent_level: usize) -> Vec<TreeDisplayItem> {
+    fn collect_directories(entry: &FileEntry, collapsed_dirs: &mut HashSet<PathBuf>) {
+        if entry.is_directory && !entry.relative_path.as_os_str().is_empty() {
+            collapsed_dirs.insert(entry.relative_path.clone());
+        }
+        
+        for child in &entry.children {
+            Self::collect_directories(child, collapsed_dirs);
+        }
+    }
+
+    fn flatten_tree(entry: &FileEntry, indent_level: usize, collapsed_dirs: &HashSet<PathBuf>) -> Vec<TreeDisplayItem> {
         let mut items = Vec::new();
         
         if !entry.relative_path.as_os_str().is_empty() {
@@ -113,23 +130,28 @@ impl TuiApp {
             });
         }
 
-        // Sort children: directories first, then files
-        let mut sorted_children = entry.children.clone();
-        sorted_children.sort_by(|a, b| {
-            match (a.is_directory, b.is_directory) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.relative_path.cmp(&b.relative_path),
-            }
-        });
+        // Only show children if directory is not collapsed (or if it's the root)
+        let is_collapsed = entry.is_directory && collapsed_dirs.contains(&entry.relative_path);
+        
+        if !is_collapsed {
+            // Sort children: directories first, then files
+            let mut sorted_children = entry.children.clone();
+            sorted_children.sort_by(|a, b| {
+                match (a.is_directory, b.is_directory) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a.relative_path.cmp(&b.relative_path),
+                }
+            });
 
-        for child in &sorted_children {
-            let child_indent = if entry.relative_path.as_os_str().is_empty() {
-                indent_level
-            } else {
-                indent_level + 1
-            };
-            items.extend(Self::flatten_tree(child, child_indent));
+            for child in &sorted_children {
+                let child_indent = if entry.relative_path.as_os_str().is_empty() {
+                    indent_level
+                } else {
+                    indent_level + 1
+                };
+                items.extend(Self::flatten_tree(child, child_indent, collapsed_dirs));
+            }
         }
 
         items
@@ -153,6 +175,15 @@ impl TuiApp {
                         }
                         KeyCode::Enter => {
                             self.select_current_item()?;
+                        }
+                        KeyCode::Left => {
+                            self.collapse_current_directory();
+                        }
+                        KeyCode::Right => {
+                            self.expand_current_directory();
+                        }
+                        KeyCode::Char(' ') => {
+                            self.toggle_current_directory();
                         }
                         KeyCode::Char('u') => {
                             self.diff_view_mode = DiffViewMode::Unified;
@@ -230,10 +261,68 @@ impl TuiApp {
         self.scroll_offset = self.scroll_offset.saturating_sub(3);
     }
 
+    fn toggle_current_directory(&mut self) {
+        if let Some(i) = self.tree_state.selected() {
+            if let Some(item) = self.tree_items.get(i) {
+                if item.is_directory {
+                    if self.collapsed_dirs.contains(&item.path) {
+                        self.collapsed_dirs.remove(&item.path);
+                    } else {
+                        self.collapsed_dirs.insert(item.path.clone());
+                    }
+                    self.refresh_tree_view();
+                }
+            }
+        }
+    }
+
+    fn expand_current_directory(&mut self) {
+        if let Some(i) = self.tree_state.selected() {
+            if let Some(item) = self.tree_items.get(i) {
+                if item.is_directory {
+                    self.collapsed_dirs.remove(&item.path);
+                    self.refresh_tree_view();
+                }
+            }
+        }
+    }
+
+    fn collapse_current_directory(&mut self) {
+        if let Some(i) = self.tree_state.selected() {
+            if let Some(item) = self.tree_items.get(i) {
+                if item.is_directory {
+                    self.collapsed_dirs.insert(item.path.clone());
+                    self.refresh_tree_view();
+                }
+            }
+        }
+    }
+
+    fn refresh_tree_view(&mut self) {
+        if let Some(ref diff_result) = self.diff_result.clone() {
+            let selected_path = self.tree_state.selected()
+                .and_then(|i| self.tree_items.get(i))
+                .map(|item| item.path.clone());
+            
+            self.tree_items = Self::flatten_tree(&diff_result.tree, 0, &self.collapsed_dirs);
+            
+            // Try to maintain selection
+            if let Some(selected_path) = selected_path {
+                if let Some(new_index) = self.tree_items.iter().position(|item| item.path == selected_path) {
+                    self.tree_state.select(Some(new_index));
+                } else if !self.tree_items.is_empty() {
+                    self.tree_state.select(Some(0));
+                }
+            } else if !self.tree_items.is_empty() {
+                self.tree_state.select(Some(0));
+            }
+        }
+    }
+
     fn ui(&mut self, f: &mut Frame) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+            .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
             .split(f.size());
 
         // File tree panel
@@ -250,6 +339,18 @@ impl TuiApp {
             .map(|item| {
                 let indent = "  ".repeat(item.indent_level);
                 let tree_connector = if item.indent_level > 0 { "├─ " } else { "" };
+                
+                // Show expand/collapse indicator for directories
+                let expand_indicator = if item.is_directory {
+                    if self.collapsed_dirs.contains(&item.path) {
+                        "▶ " // Collapsed
+                    } else {
+                        "▼ " // Expanded
+                    }
+                } else {
+                    "  "
+                };
+                
                 let icon = if item.is_directory { "📁" } else { "📄" };
                 let status_icon = item.status.icon();
                 let color = match item.status {
@@ -265,6 +366,7 @@ impl TuiApp {
                     Span::styled(status_icon, Style::default().fg(color)),
                     Span::raw(" "),
                     Span::styled(tree_connector, Style::default().fg(Color::DarkGray)),
+                    Span::styled(expand_indicator, Style::default().fg(Color::DarkGray)),
                     Span::raw(icon),
                     Span::raw(" "),
                     Span::styled(&item.display_name, Style::default().fg(color)),
@@ -296,6 +398,8 @@ impl TuiApp {
                 Line::from("File Navigation:"),
                 Line::from("  ↑/↓ arrows - Navigate file tree"),
                 Line::from("  Enter - View file diff"),
+                Line::from("  ←/→ arrows - Collapse/expand directory"),
+                Line::from("  Space - Toggle directory"),
                 Line::from(""),
                 Line::from("Diff Controls:"),
                 Line::from("  u - Unified diff mode"),
@@ -307,20 +411,6 @@ impl TuiApp {
                 Line::from("  q - Quit"),
                 Line::from(""),
                 Line::from(format!("Current mode: {}", mode_text)),
-                Line::from(""),
-                Line::from("Legend:"),
-                Line::from(vec![
-                    Span::styled("+ ", Style::default().fg(Color::Green)),
-                    Span::raw("Added lines")
-                ]),
-                Line::from(vec![
-                    Span::styled("- ", Style::default().fg(Color::Red)),
-                    Span::raw("Removed lines")
-                ]),
-                Line::from(vec![
-                    Span::styled("  ", Style::default().fg(Color::White)),
-                    Span::raw("Context lines")
-                ]),
             ];
             let help = Paragraph::new(help_text)
                 .block(Block::default().borders(Borders::ALL).title("Help"))
@@ -334,9 +424,11 @@ impl TuiApp {
             let content = diff.left_content.as_deref()
                 .or(diff.right_content.as_deref())
                 .unwrap_or("File not found");
-            let paragraph = Paragraph::new(content)
+            let lines: Vec<Line> = content.lines().map(|line| Line::from(line)).collect();
+            let paragraph = Paragraph::new(lines)
                 .block(Block::default().borders(Borders::ALL).title("No Changes"))
-                .wrap(Wrap { trim: true });
+                .wrap(Wrap { trim: false })
+                .scroll((self.scroll_offset, 0));
             f.render_widget(paragraph, area);
             return;
         }
@@ -344,7 +436,7 @@ impl TuiApp {
         let mut diff_lines = Vec::new();
         
         for hunk in &diff.hunks {
-            // Add hunk header with background highlight
+            // Add hunk header with full background
             diff_lines.push(Line::from(vec![
                 Span::styled(
                     format!("@@ -{},{} +{},{} @@", 
@@ -354,7 +446,7 @@ impl TuiApp {
                 )
             ]));
 
-            // Add diff lines with appropriate colors and backgrounds
+            // Add diff lines with background colors
             for line in &hunk.lines {
                 let (fg_color, bg_color, prefix) = match line.kind {
                     crate::core::types::DiffLineKind::Addition => (Color::Green, Color::Rgb(0, 64, 0), "+"),
@@ -362,9 +454,10 @@ impl TuiApp {
                     crate::core::types::DiffLineKind::Context => (Color::White, Color::Reset, " "),
                 };
 
+                // Create single span for the entire line to avoid rendering issues
+                let full_line = format!("{}{}", prefix, line.content);
                 diff_lines.push(Line::from(vec![
-                    Span::styled(prefix.to_string(), Style::default().fg(fg_color).bg(bg_color)),
-                    Span::styled(line.content.clone(), Style::default().fg(fg_color).bg(bg_color))
+                    Span::styled(full_line, Style::default().fg(fg_color).bg(bg_color))
                 ]));
             }
         }
@@ -382,79 +475,20 @@ impl TuiApp {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(area);
 
-        // Render left side with highlighting
-        let left_lines = self.create_side_by_side_lines(diff, true);
-        let left_paragraph = Paragraph::new(left_lines)
+        // Render left side
+        let left_content = diff.left_content.as_deref().unwrap_or("File not found");
+        let left_paragraph = Paragraph::new(left_content)
             .block(Block::default().borders(Borders::ALL).title("Left (Original)"))
             .wrap(Wrap { trim: false })
             .scroll((self.scroll_offset, 0));
         f.render_widget(left_paragraph, chunks[0]);
 
-        // Render right side with highlighting
-        let right_lines = self.create_side_by_side_lines(diff, false);
-        let right_paragraph = Paragraph::new(right_lines)
+        // Render right side
+        let right_content = diff.right_content.as_deref().unwrap_or("File not found");
+        let right_paragraph = Paragraph::new(right_content)
             .block(Block::default().borders(Borders::ALL).title("Right (Modified)"))
             .wrap(Wrap { trim: false })
             .scroll((self.scroll_offset, 0));
         f.render_widget(right_paragraph, chunks[1]);
-    }
-
-    fn create_side_by_side_lines(&self, diff: &FileDiff, is_left_side: bool) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        
-        if diff.hunks.is_empty() {
-            let content = if is_left_side {
-                diff.left_content.as_deref().unwrap_or("File not found")
-            } else {
-                diff.right_content.as_deref().unwrap_or("File not found")
-            };
-            
-            for line in content.lines() {
-                lines.push(Line::from(line.to_string()));
-            }
-            return lines;
-        }
-
-        for hunk in &diff.hunks {
-            // Add hunk header
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("@@ -{},{} +{},{} @@", 
-                        hunk.old_start, hunk.old_lines, 
-                        hunk.new_start, hunk.new_lines),
-                    Style::default().fg(Color::Cyan).bg(Color::DarkGray)
-                )
-            ]));
-
-            for line in &hunk.lines {
-                match line.kind {
-                    crate::core::types::DiffLineKind::Context => {
-                        lines.push(Line::from(vec![
-                            Span::styled(line.content.clone(), Style::default().fg(Color::White))
-                        ]));
-                    }
-                    crate::core::types::DiffLineKind::Addition => {
-                        if is_left_side {
-                            lines.push(Line::from(""));
-                        } else {
-                            lines.push(Line::from(vec![
-                                Span::styled(line.content.clone(), Style::default().fg(Color::Green).bg(Color::Rgb(0, 64, 0)))
-                            ]));
-                        }
-                    }
-                    crate::core::types::DiffLineKind::Deletion => {
-                        if is_left_side {
-                            lines.push(Line::from(vec![
-                                Span::styled(line.content.clone(), Style::default().fg(Color::Red).bg(Color::Rgb(64, 0, 0)))
-                            ]));
-                        } else {
-                            lines.push(Line::from(""));
-                        }
-                    }
-                }
-            }
-        }
-
-        lines
     }
 }
