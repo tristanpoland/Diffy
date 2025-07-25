@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::services::ServeDir;
+use tokio::io::AsyncReadExt;
 use anyhow::Result;
 
 #[derive(Clone)]
@@ -605,8 +606,48 @@ pub async fn start_server(core: DiffyCore, port: u16) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
     
     println!("🚀 Diffy web server running at http://127.0.0.1:{}", port);
+    println!("Press Ctrl+C or 'q' + Enter to quit");
     
-    axum::serve(listener, app).await?;
+    // Create a channel for shutdown signal
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    
+    // Spawn a task to handle keyboard input
+    let keyboard_shutdown_tx = shutdown_tx;
+    tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buffer = [0u8; 1];
+        
+        loop {
+            if let Ok(_) = stdin.read(&mut buffer).await {
+                if buffer[0] == b'q' || buffer[0] == b'Q' {
+                    println!("Shutting down server...");
+                    let _ = keyboard_shutdown_tx.send(());
+                    break;
+                }
+            }
+        }
+    });
+    
+    // Set up Ctrl+C handler
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+    
+    // Run the server with graceful shutdown
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::select! {
+                _ = ctrl_c => {
+                    println!("\nReceived Ctrl+C, shutting down...");
+                }
+                _ = shutdown_rx => {
+                    println!("Keyboard shutdown signal received");
+                }
+            }
+        })
+        .await?;
     
     Ok(())
 }
